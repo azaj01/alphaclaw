@@ -13,16 +13,27 @@ const { execSync } = require("child_process");
 const args = process.argv.slice(2);
 const command = args.find((a) => !a.startsWith("-"));
 
+const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+
+if (args.includes("--version") || args.includes("-v") || command === "version") {
+  console.log(pkg.version);
+  process.exit(0);
+}
+
 if (!command || command === "help" || args.includes("--help")) {
   console.log(`
+alphaclaw v${pkg.version}
+
 Usage: alphaclaw <command> [options]
 
 Commands:
   start     Start the AlphaClaw server (Setup UI + gateway manager)
+  version   Print version
 
 Options:
   --root-dir <path>   Persistent data directory (default: ~/.alphaclaw)
   --port <number>     Server port (default: 3000)
+  --version, -v       Print version
   --help              Show this help message
 `);
   process.exit(0);
