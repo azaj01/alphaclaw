@@ -118,17 +118,24 @@ describe("server/openclaw-version", () => {
         updated: true,
       }),
     );
-    expect(execMock).toHaveBeenCalledWith(
-      "npm install --omit=dev --no-save --package-lock=false --prefer-online openclaw@latest",
-      {
-        cwd: kNpmPackageRoot,
+    expect(execMock).toHaveBeenCalledTimes(2);
+    expect(execMock).toHaveBeenNthCalledWith(
+      1,
+      "npm install --omit=dev --prefer-online --package-lock=false",
+      expect.objectContaining({
         env: expect.objectContaining({
           npm_config_update_notifier: "false",
           npm_config_fund: "false",
           npm_config_audit: "false",
         }),
         timeout: 180000,
-      },
+      }),
+      expect.any(Function),
+    );
+    expect(execMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringMatching(/^cp -af /),
+      expect.objectContaining({ timeout: 60000 }),
       expect.any(Function),
     );
     expect(restartGateway).toHaveBeenCalledTimes(1);
@@ -147,9 +154,9 @@ describe("server/openclaw-version", () => {
       }
       throw new Error(`Unexpected command: ${command}`);
     });
-    let installCallback = null;
+    const callbacks = [];
     execMock.mockImplementation((cmd, opts, callback) => {
-      installCallback = callback;
+      callbacks.push(callback);
     });
 
     const firstUpdatePromise = service.updateOpenclaw();
@@ -164,7 +171,11 @@ describe("server/openclaw-version", () => {
       error: "OpenClaw update already in progress",
     });
 
-    installCallback(null, "installed", "");
+    callbacks[0](null, "installed", "");
+    await new Promise((resolve) => {
+      setImmediate(resolve);
+    });
+    callbacks[1](null, "", "");
     await firstUpdatePromise;
   });
 });
