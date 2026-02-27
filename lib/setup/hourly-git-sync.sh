@@ -4,6 +4,14 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO"
 
+# Load persisted env vars when running under cron's minimal environment.
+if [[ -f "$REPO/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$REPO/.env"
+  set +a
+fi
+
 # Drop cron scheduler runtime-only churn when it is metadata/timestamp-only.
 maybe_restore_if_runtime_only() {
   local file="$1"
@@ -73,14 +81,5 @@ NODE
 maybe_restore_if_runtime_only "cron/jobs.json"
 maybe_restore_if_runtime_only "crons.json"
 
-# Stage everything else.
-git add -A
-
-# Nothing to commit? done.
-if git diff --cached --quiet; then
-  exit 0
-fi
-
 msg="Auto-commit hourly sync $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-git commit -m "$msg"
-git push
+alphaclaw git-sync -m "$msg"

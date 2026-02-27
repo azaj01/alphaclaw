@@ -50,11 +50,8 @@ const makeValidBody = () => ({
 });
 
 describe("server/routes/onboarding", () => {
-  const kDebugForcePushEnv = "OPENCLAW_DEBUG_FORCE_PUSH";
-
   beforeEach(() => {
     global.fetch = vi.fn();
-    delete process.env[kDebugForcePushEnv];
   });
 
   it("returns onboard status from dependency", async () => {
@@ -194,9 +191,15 @@ describe("server/routes/onboarding", () => {
     );
 
     const initialPushCall = deps.shellCmd.mock.calls.find(([cmd]) =>
-      cmd.includes('git commit -m "initial setup"'),
+      cmd.includes('alphaclaw git-sync -m "initial setup"'),
     );
-    expect(initialPushCall[0]).toContain("git push -u origin main");
+    expect(initialPushCall).toBeTruthy();
+
+    const gitInitCall = deps.shellCmd.mock.calls.find(([cmd]) =>
+      cmd.includes('git remote add origin "https://github.com/owner/repo.git"'),
+    );
+    expect(gitInitCall).toBeTruthy();
+    expect(gitInitCall[0]).not.toContain("ghp_test_123456789");
 
     const openclawWriteCall = deps.fs.writeFileSync.mock.calls.find(
       ([path]) => path === "/tmp/openclaw/openclaw.json",
@@ -226,31 +229,9 @@ describe("server/routes/onboarding", () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
     const initialPushCall = deps.shellCmd.mock.calls.find(([cmd]) =>
-      cmd.includes('git commit -m "initial setup"'),
+      cmd.includes('alphaclaw git-sync -m "initial setup"'),
     );
     expect(initialPushCall).toBeTruthy();
-    expect(initialPushCall[0]).toContain("git push -u origin main");
-  });
-
-  it("uses force push when OPENCLAW_DEBUG_FORCE_PUSH is enabled", async () => {
-    process.env[kDebugForcePushEnv] = "1";
-    const deps = createBaseDeps();
-    deps.fs.readFileSync.mockImplementation((p) => {
-      if (p === "/tmp/openclaw/openclaw.json") return "{}";
-      if (p === path.join(kSetupDir, "skills", "control-ui", "SKILL.md")) return "BASE={{BASE_URL}}";
-      if (p === path.join(kSetupDir, "hourly-git-sync.sh")) return "echo Auto-commit hourly sync";
-      return "{}";
-    });
-    const app = createApp(deps);
-    global.fetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    const res = await request(app).post("/api/onboard").send(makeValidBody());
-
-    expect(res.status).toBe(200);
-    const initialPushCall = deps.shellCmd.mock.calls.find(([cmd]) =>
-      cmd.includes('git commit -m "initial setup"'),
-    );
-    expect(initialPushCall[0]).toContain("git push -u --force origin main");
   });
 
   it("sanitizes onboarding command failures to avoid leaking secrets", async () => {

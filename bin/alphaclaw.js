@@ -28,21 +28,35 @@ Usage: alphaclaw <command> [options]
 
 Commands:
   start     Start the AlphaClaw server (Setup UI + gateway manager)
+  git-sync  Commit and push /data/.openclaw safely using GITHUB_TOKEN
   version   Print version
 
 Options:
   --root-dir <path>   Persistent data directory (default: ~/.alphaclaw)
   --port <number>     Server port (default: 3000)
+  --message, -m <text> Commit message (for git-sync)
   --version, -v       Print version
   --help              Show this help message
 `);
   process.exit(0);
 }
 
-const flagValue = (flag) => {
-  const idx = args.indexOf(flag);
-  return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
+const flagValue = (...flags) => {
+  for (const flag of flags) {
+    const idx = args.indexOf(flag);
+    if (idx !== -1 && idx + 1 < args.length) {
+      return args[idx + 1];
+    }
+  }
+  return undefined;
 };
+const quoteArg = (value) => `'${String(value || "").replace(/'/g, "'\"'\"'")}'`;
+const resolveGithubRepoPath = (value) =>
+  String(value || "")
+    .trim()
+    .replace(/^git@github\.com:/, "")
+    .replace(/^https:\/\/github\.com\//, "")
+    .replace(/\.git$/, "");
 
 // ---------------------------------------------------------------------------
 // 1. Resolve root directory (before requiring any lib/ modules)
@@ -154,6 +168,96 @@ if (fs.existsSync(envFilePath)) {
   console.log("[alphaclaw] Loaded .env");
 }
 
+const runGitSync = () => {
+  const githubToken = String(process.env.GITHUB_TOKEN || "").trim();
+  const githubRepo = resolveGithubRepoPath(process.env.GITHUB_WORKSPACE_REPO || "");
+  const commitMessage = String(flagValue("--message", "-m") || "").trim();
+  if (!commitMessage) {
+    console.error("[alphaclaw] Missing --message for git-sync");
+    return 1;
+  }
+  if (!githubToken) {
+    console.error("[alphaclaw] Missing GITHUB_TOKEN for git-sync");
+    return 1;
+  }
+  if (!githubRepo) {
+    console.error("[alphaclaw] Missing GITHUB_WORKSPACE_REPO for git-sync");
+    return 1;
+  }
+  if (!fs.existsSync(path.join(openclawDir, ".git"))) {
+    console.error("[alphaclaw] No git repository at /data/.openclaw");
+    return 1;
+  }
+
+  const originUrl = `https://github.com/${githubRepo}.git`;
+  const branch =
+    String(
+      execSync("git rev-parse --abbrev-ref HEAD", { cwd: openclawDir, encoding: "utf8" }),
+    ).trim() || "main";
+  const askPassPath = path.join(os.tmpdir(), `alphaclaw-git-askpass-${process.pid}.sh`);
+  const runGit = (gitCommand, { withAuth = false } = {}) => {
+    const cmd = withAuth
+      ? `GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=${quoteArg(askPassPath)} git ${gitCommand}`
+      : `git ${gitCommand}`;
+    return execSync(cmd, {
+      cwd: openclawDir,
+      stdio: "pipe",
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_TOKEN: githubToken,
+      },
+    });
+  };
+
+  try {
+    fs.writeFileSync(
+      askPassPath,
+      [
+        "#!/usr/bin/env sh",
+        'case "$1" in',
+        '  *Username*) echo "x-access-token" ;;',
+        '  *Password*) echo "${GITHUB_TOKEN:-}" ;;',
+        '  *) echo "" ;;',
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+
+    runGit(`remote set-url origin ${quoteArg(originUrl)}`);
+    try {
+      runGit(`ls-remote --exit-code --heads origin ${quoteArg(branch)}`, { withAuth: true });
+      runGit(`pull --rebase --autostash origin ${quoteArg(branch)}`, { withAuth: true });
+    } catch {
+      console.log(`[alphaclaw] Remote branch "${branch}" not found, skipping pull`);
+    }
+    runGit("add -A");
+    try {
+      runGit("diff --cached --quiet");
+      console.log("[alphaclaw] No changes to commit");
+      return 0;
+    } catch {}
+    runGit(`commit -m ${quoteArg(commitMessage)}`);
+    runGit(`push origin ${quoteArg(branch)}`, { withAuth: true });
+    const hash = String(runGit("rev-parse --short HEAD")).trim();
+    console.log(`[alphaclaw] Git sync complete (${hash})`);
+    return 0;
+  } catch (e) {
+    const details = String(e.stderr || e.stdout || e.message || "").trim();
+    console.error(`[alphaclaw] git-sync failed: ${details.slice(0, 400)}`);
+    return 1;
+  } finally {
+    try {
+      fs.rmSync(askPassPath, { force: true });
+    } catch {}
+  }
+};
+
+if (command === "git-sync") {
+  process.exit(runGitSync());
+}
+
 const kSetupPassword = String(process.env.SETUP_PASSWORD || "").trim();
 if (!kSetupPassword) {
   console.error(
@@ -225,6 +329,26 @@ if (!fs.existsSync(gogConfigFile)) {
 // ---------------------------------------------------------------------------
 
 const hourlyGitSyncPath = path.join(openclawDir, "hourly-git-sync.sh");
+const packagedHourlyGitSyncPath = path.join(setupDir, "hourly-git-sync.sh");
+
+try {
+  if (fs.existsSync(packagedHourlyGitSyncPath)) {
+    const packagedSyncScript = fs.readFileSync(packagedHourlyGitSyncPath, "utf8");
+    const installedSyncScript = fs.existsSync(hourlyGitSyncPath)
+      ? fs.readFileSync(hourlyGitSyncPath, "utf8")
+      : "";
+    const shouldInstallSyncScript =
+      !installedSyncScript
+      || !installedSyncScript.includes("GIT_ASKPASS")
+      || !installedSyncScript.includes("GITHUB_TOKEN");
+    if (shouldInstallSyncScript && packagedSyncScript.trim()) {
+      fs.writeFileSync(hourlyGitSyncPath, packagedSyncScript, { mode: 0o755 });
+      console.log("[alphaclaw] Refreshed hourly git sync script");
+    }
+  }
+} catch (e) {
+  console.log(`[alphaclaw] Hourly git sync script refresh skipped: ${e.message}`);
+}
 
 if (fs.existsSync(hourlyGitSyncPath)) {
   try {
@@ -308,17 +432,40 @@ const configPath = path.join(openclawDir, "openclaw.json");
 if (fs.existsSync(configPath)) {
   console.log("[alphaclaw] Config exists, reconciling channels...");
 
-  const githubToken = process.env.GITHUB_TOKEN;
   const githubRepo = process.env.GITHUB_WORKSPACE_REPO;
-  if (githubToken && githubRepo && fs.existsSync(path.join(openclawDir, ".git"))) {
-    const repoUrl = githubRepo
-      .replace(/^git@github\.com:/, "")
-      .replace(/^https:\/\/github\.com\//, "")
-      .replace(/\.git$/, "");
-    const remoteUrl = `https://${githubToken}@github.com/${repoUrl}.git`;
+  if (fs.existsSync(path.join(openclawDir, ".git"))) {
+    if (githubRepo) {
+      const repoUrl = githubRepo
+        .replace(/^git@github\.com:/, "")
+        .replace(/^https:\/\/github\.com\//, "")
+        .replace(/\.git$/, "");
+      const remoteUrl = `https://github.com/${repoUrl}.git`;
+      try {
+        execSync(`git remote set-url origin "${remoteUrl}"`, {
+          cwd: openclawDir,
+          stdio: "ignore",
+        });
+        console.log("[alphaclaw] Repo ready");
+      } catch {}
+    }
+
+    // Migration path: scrub persisted PATs from existing GitHub origin URLs.
     try {
-      execSync(`git remote set-url origin "${remoteUrl}"`, { cwd: openclawDir, stdio: "ignore" });
-      console.log("[alphaclaw] Repo ready");
+      const existingOrigin = execSync("git remote get-url origin", {
+        cwd: openclawDir,
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8",
+      }).trim();
+      const match = existingOrigin.match(/^https:\/\/[^/@]+@github\.com\/(.+)$/i);
+      if (match?.[1]) {
+        const cleanedPath = String(match[1]).replace(/\.git$/i, "");
+        const cleanedOrigin = `https://github.com/${cleanedPath}.git`;
+        execSync(`git remote set-url origin "${cleanedOrigin}"`, {
+          cwd: openclawDir,
+          stdio: "ignore",
+        });
+        console.log("[alphaclaw] Scrubbed tokenized GitHub remote URL");
+      }
     } catch {}
   }
 
